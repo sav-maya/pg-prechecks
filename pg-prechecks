@@ -1,0 +1,267 @@
+#!/bin/bash
+
+# PostgreSQL Pre-Check Script
+# This script collects information about a PostgreSQL instance and generates a summary report.
+
+set -e
+
+# Default values
+PGHOST="your-rds-endpoint.region.rds.amazonaws.com"
+PGPORT="5432"
+PGUSER="your_rds_master_username"
+PGDATABASE="postgres"
+OUTPUT_DIR="pg_precheck_$(date +%Y%m%d_%H%M%S)"
+
+# Function to execute PostgreSQL queries
+run_query() {
+    psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" -t -c "$1"
+}
+
+# Function to collect PostgreSQL information
+collect_pg_info() {
+    mkdir -p "$OUTPUT_DIR"
+
+    # Check for logical replication support
+    run_query "SELECT CASE WHEN setting = 'logical' THEN 'Supported' ELSE 'Not supported' END AS logical_replication_support FROM pg_settings WHERE name = 'wal_level';" > "$OUTPUT_DIR/logical_replication.txt"
+
+    # Check for number of replicas
+    run_query "SELECT count(*) FROM pg_stat_replication;" > "$OUTPUT_DIR/replica_count.txt"
+
+    # Version information
+    run_query "SELECT version();" > "$OUTPUT_DIR/version.txt"
+
+    # List of databases
+    run_query "SELECT datname FROM pg_database WHERE datistemplate = false ORDER BY datname;" > "$OUTPUT_DIR/databases.txt"
+
+    # Database sizes
+    run_query "SELECT datname, pg_size_pretty(pg_database_size(datname)) FROM pg_database ORDER BY pg_database_size(datname) DESC;" > "$OUTPUT_DIR/database_sizes.txt"
+
+    # Table and index sizes (top 20)
+    run_query "SELECT schemaname || '.' || tablename AS table_name, 
+               pg_size_pretty(pg_total_relation_size(schemaname || '.' || tablename)) AS total_size,
+               pg_size_pretty(pg_table_size(schemaname || '.' || tablename)) AS table_size,
+               pg_size_pretty(pg_indexes_size(schemaname || '.' || tablename)) AS index_size
+               FROM pg_tables 
+               ORDER BY pg_total_relation_size(schemaname || '.' || tablename) DESC 
+               LIMIT 20;" > "$OUTPUT_DIR/table_index_sizes.txt"
+
+    # Settings
+    run_query "SELECT name, setting, unit, context FROM pg_settings ORDER BY name;" > "$OUTPUT_DIR/settings.txt"
+
+    # Extensions
+    run_query "SELECT * FROM pg_extension;" > "$OUTPUT_DIR/extensions.txt"
+
+    # Activity
+    run_query "SELECT * FROM pg_stat_activity;" > "$OUTPUT_DIR/activity.txt"
+
+    # Indexes
+    run_query "SELECT schemaname, tablename, indexname, indexdef FROM pg_indexes ORDER BY schemaname, tablename;" > "$OUTPUT_DIR/indexes.txt"
+
+    # Roles
+    run_query "SELECT * FROM pg_roles;" > "$OUTPUT_DIR/roles.txt"
+
+    # Long-Running Queries
+    echo "----------------------------------" > "$OUTPUT_DIR/long_running_queries.txt"
+    echo " Long-Running Queries" >> "$OUTPUT_DIR/long_running_queries.txt"
+    echo "----------------------------------" >> "$OUTPUT_DIR/long_running_queries.txt"
+    run_query "SELECT pid, 
+               now() - pg_stat_activity.query_start AS duration, 
+               query 
+               FROM pg_stat_activity 
+               WHERE state != 'idle' 
+               AND now() - pg_stat_activity.query_start > interval '5 minutes' 
+               ORDER BY duration DESC;" >> "$OUTPUT_DIR/long_running_queries.txt"
+
+    # Locks Information
+    echo "----------------------------------" > "$OUTPUT_DIR/locks_information.txt"
+    echo " Locks Information" >> "$OUTPUT_DIR/locks_information.txt"
+    echo "----------------------------------" >> "$OUTPUT_DIR/locks_information.txt"
+    run_query "SELECT l.pid, 
+               locktype, 
+               mode, 
+               granted, 
+               relation::regclass AS table_name,
+               a.query
+               FROM pg_locks l
+               JOIN pg_stat_activity a ON l.pid = a.pid
+               WHERE relation IS NOT NULL
+               ORDER BY relation, locktype, mode;" >> "$OUTPUT_DIR/locks_information.txt"
+}
+
+# Function to generate summary report
+generate_report() {
+    {
+        echo "# PostgreSQL Pre-Check Report"
+        echo "Date: $(date)"
+        echo
+
+        echo "## Version"
+        cat "$OUTPUT_DIR/version.txt"
+        echo
+
+        echo "## Databases"
+        cat "$OUTPUT_DIR/databases.txt"
+        echo
+
+        echo "## Database Sizes"
+        cat "$OUTPUT_DIR/database_sizes.txt"
+        echo
+
+        echo "## Top 20 Table and Index Sizes"
+        cat "$OUTPUT_DIR/table_index_sizes.txt"
+        echo
+
+        echo "## Notable Settings"
+        grep -E "(max_connections|shared_buffers|work_mem|maintenance_work_mem|effective_cache_size)" "$OUTPUT_DIR/settings.txt"
+        echo
+
+        echo "## Installed Extensions"
+        cat "$OUTPUT_DIR/extensions.txt"
+        echo
+
+        echo "## Current Activity Summary"
+        grep -c . "$OUTPUT_DIR/activity.txt"
+        echo "active connections"
+        echo
+
+        echo "## Index Count"
+        wc -l < "$OUTPUT_DIR/indexes.txt"
+        echo "total indexes"
+        echo
+
+        echo "## User Roles"
+        cat "$OUTPUT_DIR/roles.txt"
+        echo
+
+        echo "## Logical Replication Support"
+        cat "$OUTPUT_DIR/logical_replication.txt"
+        echo
+
+        echo "## Number of Replicas"
+        cat "$OUTPUT_DIR/replica_count.txt"
+        echo "active replicas"
+        echo
+
+        echo "## Long-Running Queries"
+        cat "$OUTPUT_DIR/long_running_queries.txt"
+        echo
+
+        echo "## Locks Information"
+        cat "$OUTPUT_DIR/locks_information.txt"
+        echo
+
+    } > "$OUTPUT_DIR/summary_report.md"
+
+    echo "Summary report generated: $OUTPUT_DIR/summary_report.md"
+}
+
+# Function to perform a version-agnostic dump
+perform_version_agnostic_dump() {
+    echo "Performing database dump..."
+    DUMP_FILE="$OUTPUT_DIR/database_dump.sql"
+    
+    # Dump schema
+    echo "-- Schema dump" > "$DUMP_FILE"
+    PGPASSWORD=$PGPASSWORD psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" -t -c "
+    SELECT 'CREATE SCHEMA IF NOT EXISTS ' || quote_ident(nspname) || ';'
+    FROM pg_namespace
+    WHERE nspname NOT IN ('public', 'information_schema', 'pg_catalog', 'pg_toast');
+
+    SELECT 'CREATE FUNCTION ' || quote_ident(nspname) || '.' || quote_ident(proname) || '(' ||
+           pg_get_function_arguments(p.oid) || ') RETURNS ' || pg_get_function_result(p.oid) || ' AS $BODY$' ||
+           pg_get_functiondef(p.oid) || '$BODY$ LANGUAGE ' || l.lanname || ';'
+    FROM pg_proc p
+    JOIN pg_namespace n ON p.pronamespace = n.oid
+    JOIN pg_language l ON p.prolang = l.oid
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema');
+
+    SELECT 'CREATE TABLE ' || quote_ident(table_schema) || '.' || quote_ident(table_name) || ' (' ||
+           string_agg(quote_ident(column_name) || ' ' || data_type || 
+                      COALESCE(' DEFAULT ' || column_default, ''), ', ') || ');'
+    FROM information_schema.columns
+    WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+    GROUP BY table_schema, table_name;
+
+    SELECT pg_get_indexdef(indexrelid)
+    FROM pg_index i
+    JOIN pg_class c ON i.indexrelid = c.oid
+    JOIN pg_namespace n ON c.relnamespace = n.oid
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema');
+    " >> "$DUMP_FILE"
+
+    # Get list of tables
+    tables=$(PGPASSWORD=$PGPASSWORD psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" -t -c "SELECT table_schema || '.' || table_name FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog', 'information_schema');")
+    
+    # Dump data for each table
+    echo "-- Data dump" >> "$DUMP_FILE"
+    for table in $tables; do
+        echo "Dumping data for table: $table"
+        echo "\echo 'Dumping data for $table'" >> "$DUMP_FILE"
+        PGPASSWORD=$PGPASSWORD psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" -c "COPY $table TO STDOUT WITH CSV HEADER;" >> "$DUMP_FILE"
+    done
+    
+    if [ $? -eq 0 ]; then
+        echo "Database dump completed successfully. Dump file: $DUMP_FILE"
+    else
+        echo "Error: Database dump failed. Please check your permissions and connection details."
+    fi
+}
+
+# Main execution
+main() {
+    echo "Collecting PostgreSQL information..."
+    collect_pg_info
+
+    echo "Generating summary report..."
+    generate_report
+
+    if [ "$PERFORM_DUMP" = true ]; then
+        perform_version_agnostic_dump
+    fi
+
+    echo "Pre-check completed. Please review the summary report."
+}
+
+# Parse command line arguments
+PERFORM_DUMP=false
+while [[ $# -gt 0 ]]; do
+    case $1 in
+        --host=*)
+            PGHOST="${1#*=}"
+            shift
+            ;;
+        --port=*)
+            PGPORT="${1#*=}"
+            shift
+            ;;
+        --user=*)
+            PGUSER="${1#*=}"
+            shift
+            ;;
+        --dbname=*)
+            PGDATABASE="${1#*=}"
+            shift
+            ;;
+        --password=*)
+            export PGPASSWORD="${1#*=}"
+            shift
+            ;;
+        --dump)
+            PERFORM_DUMP=true
+            shift
+            ;;
+        *)
+            echo "Unknown parameter: $1"
+            exit 1
+            ;;
+    esac
+done
+
+# Check if required parameters are set
+if [ -z "$PGHOST" ] || [ -z "$PGUSER" ] || [ -z "$PGPASSWORD" ]; then
+    echo "Error: Host, user, and password are required. Use --host=, --user=, and --password= parameters."
+    exit 1
+fi
+
+# Run the main function
+main
