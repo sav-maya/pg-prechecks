@@ -13,7 +13,7 @@ SYNOPSIS
     and can be pasted into emails without losing the formatting. It should
     work well on any modern UNIX systems.
 
-  pg-prechecks is a heavily modified version of pt-postgres-summary, which is
+  pg-prechecks is a heavily modified version of pt-pg-summary, which is
     part of the Percona Toolkit.
 
 RISKS 
@@ -167,10 +167,10 @@ If you encounter any issues:
 
 ```
 ABOUT PERCONA TOOLKIT
-    This tool is a heavily modified version of pt-mysql-summary, which is
+    This tool is a heavily modified version of pt-pg-summary, which is
     part of Percona Toolkit, a collection of advanced command-line tools for
-    MySQL developed by Percona. Percona Toolkit was forked from two projects
-    in June, 2011: Maatkit and Aspersa. Those projects were created by Baron
+    PostgreSQL developed by Percona. Percona Toolkit was forked from two projects
+    in June, 2013: Maatkit and Aspersa. Those projects were created by Baron
     Schwartz and primarily developed by him and Daniel Nichter. Visit
     <http://www.percona.com/software/> to learn about other free,
     open-source software from Percona.
