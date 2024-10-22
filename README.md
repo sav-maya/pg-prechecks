@@ -48,6 +48,11 @@ This script requires database credentials. Ensure you're using it in a secure en
 - Reports the number of active replicas
 - Identifies long-running queries
 - Reports on locks information
+- Checks for primary keys, total number of active locks, max. no. of locks that a transaction can have
+- Checks if partitions exist 
+- Checks If auto-generated columns exist
+- Checks for event triggers 
+- Checks if (icu) localization features are used
 - Optionally performs a version-agnostic database dump
 
 ## Prerequisites
