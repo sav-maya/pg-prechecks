@@ -240,57 +240,107 @@ perform_version_agnostic_dump() {
     echo "Performing database dump..."
     DUMP_FILE="$OUTPUT_DIR/database_dump.sql"
     
-    # Dump schema
+    # Dump schema (keep this part as it was)
     echo "-- Schema dump" > "$DUMP_FILE"
     PGPASSWORD=$PGPASSWORD psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" -t -c "
+    -- Schemas
     SELECT 'CREATE SCHEMA IF NOT EXISTS ' || quote_ident(nspname) || ';'
     FROM pg_namespace
     WHERE nspname NOT IN ('public', 'information_schema', 'pg_catalog', 'pg_toast');
 
-    SELECT 'CREATE FUNCTION ' || quote_ident(nspname) || '.' || quote_ident(proname) || '(' ||
+    -- Tables
+    SELECT 'CREATE TABLE ' || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || ' (' ||
+           string_agg(quote_ident(a.attname) || ' ' || pg_catalog.format_type(a.atttypid, a.atttypmod) ||
+                      CASE WHEN a.attnotnull THEN ' NOT NULL' ELSE '' END ||
+                      CASE WHEN ad.adbin IS NOT NULL THEN ' DEFAULT ' || pg_get_expr(ad.adbin, ad.adrelid) ELSE '' END,
+                      ', ') || ');'
+    FROM pg_class c
+    JOIN pg_namespace n ON c.relnamespace = n.oid
+    JOIN pg_attribute a ON c.oid = a.attrelid
+    LEFT JOIN pg_attrdef ad ON a.attrelid = ad.adrelid AND a.attnum = ad.adnum
+    WHERE c.relkind = 'r' AND a.attnum > 0 AND NOT a.attisdropped
+    AND n.nspname NOT IN ('pg_catalog', 'information_schema')
+    GROUP BY n.nspname, c.relname, c.oid;
+
+    -- Indexes
+    SELECT pg_get_indexdef(i.indexrelid)
+    FROM pg_index i
+    JOIN pg_class c ON i.indexrelid = c.oid
+    JOIN pg_namespace n ON c.relnamespace = n.oid
+    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema');
+
+    -- Views
+    SELECT 'CREATE OR REPLACE VIEW ' || quote_ident(n.nspname) || '.' || quote_ident(c.relname) || ' AS ' || 
+           pg_get_viewdef(c.oid)
+    FROM pg_class c
+    JOIN pg_namespace n ON c.relnamespace = n.oid
+    WHERE c.relkind = 'v' AND n.nspname NOT IN ('pg_catalog', 'information_schema');
+
+    -- Functions
+    SELECT 'CREATE OR REPLACE FUNCTION ' || quote_ident(n.nspname) || '.' || quote_ident(p.proname) || '(' ||
            pg_get_function_arguments(p.oid) || ') RETURNS ' || pg_get_function_result(p.oid) || ' AS $BODY$' ||
            pg_get_functiondef(p.oid) || '$BODY$ LANGUAGE ' || l.lanname || ';'
     FROM pg_proc p
     JOIN pg_namespace n ON p.pronamespace = n.oid
     JOIN pg_language l ON p.prolang = l.oid
     WHERE n.nspname NOT IN ('pg_catalog', 'information_schema');
-
-    SELECT 'CREATE TABLE ' || quote_ident(table_schema) || '.' || quote_ident(table_name) || ' (' ||
-           string_agg(quote_ident(column_name) || ' ' || data_type || 
-                      COALESCE(' DEFAULT ' || column_default, ''), ', ') || ');'
-    FROM information_schema.columns
-    WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
-    GROUP BY table_schema, table_name;
-
-    SELECT pg_get_indexdef(indexrelid)
-    FROM pg_index i
-    JOIN pg_class c ON i.indexrelid = c.oid
-    JOIN pg_namespace n ON c.relnamespace = n.oid
-    WHERE n.nspname NOT IN ('pg_catalog', 'information_schema');
     " >> "$DUMP_FILE"
 
-    # Get list of tables
-    tables=$(PGPASSWORD=$PGPASSWORD psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" -t -c "SELECT table_schema || '.' || table_name FROM information_schema.tables WHERE table_schema NOT IN ('pg_catalog', 'information_schema');")
-    
-    # Dump data for each table
+    # Dump data (modified part)
     echo "-- Data dump" >> "$DUMP_FILE"
-    for table in $tables; do
-        echo "Dumping data for table: $table"
-        echo "\echo 'Dumping data for $table'" >> "$DUMP_FILE"
-        PGPASSWORD=$PGPASSWORD psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" -c "COPY $table TO STDOUT WITH CSV HEADER;" >> "$DUMP_FILE"
+    PGPASSWORD=$PGPASSWORD psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" -t -c "
+    SELECT quote_ident(n.nspname) || '.' || quote_ident(c.relname) AS full_table_name
+    FROM pg_class c
+    JOIN pg_namespace n ON c.relnamespace = n.oid
+    WHERE c.relkind = 'r' AND n.nspname NOT IN ('pg_catalog', 'information_schema');" | while read -r table; do
+        if [ -n "$table" ]; then
+            echo "Dumping data for table: $table"
+            echo "COPY $table FROM stdin;" >> "$DUMP_FILE"
+            PGPASSWORD=$PGPASSWORD psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" -c "COPY $table TO STDOUT;" >> "$DUMP_FILE"
+            echo "\\." >> "$DUMP_FILE"
+        fi
     done
-    
+
     if [ $? -eq 0 ]; then
         echo "Database dump completed successfully. Dump file: $DUMP_FILE"
     else
         echo "Error: Database dump failed. Please check your permissions and connection details."
+        return 1
     fi
 }
 
-# Main execution
+# New function to capture \d+ output
+capture_table_details() {
+    echo "Capturing detailed table information..."
+    TABLE_DETAILS_FILE="$OUTPUT_DIR/table_details.txt"
+    
+    echo "Detailed Table Information" > "$TABLE_DETAILS_FILE"
+    echo "===========================" >> "$TABLE_DETAILS_FILE"
+    echo "" >> "$TABLE_DETAILS_FILE"
+
+    # Get list of all tables
+    tables=$(PGPASSWORD=$PGPASSWORD psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" -t -c "SELECT schemaname || '.' || tablename FROM pg_tables WHERE schemaname NOT IN ('pg_catalog', 'information_schema') ORDER BY schemaname, tablename;")
+
+    # Loop through each table and capture \d+ output
+    while read -r table; do
+        if [ -n "$table" ]; then
+            echo "Table: $table" >> "$TABLE_DETAILS_FILE"
+            echo "------------------------" >> "$TABLE_DETAILS_FILE"
+            PGPASSWORD=$PGPASSWORD psql -h "$PGHOST" -p "$PGPORT" -U "$PGUSER" -d "$PGDATABASE" -c "\d+ $table" >> "$TABLE_DETAILS_FILE"
+            echo "" >> "$TABLE_DETAILS_FILE"
+        fi
+    done <<< "$tables"
+
+    echo "Detailed table information captured in: $TABLE_DETAILS_FILE"
+}
+
+# Modify the main function to include the new capture_table_details function
 main() {
     echo "Collecting PostgreSQL information..."
     collect_pg_info
+
+    echo "Capturing detailed table information..."
+    capture_table_details
 
     echo "Generating summary report..."
     generate_report
@@ -299,7 +349,7 @@ main() {
         perform_version_agnostic_dump
     fi
 
-    echo "Pre-check completed. Please review the summary report."
+    echo "Pre-check completed. Please review the summary report and table details."
 }
 
 # Parse command line arguments
