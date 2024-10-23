@@ -162,6 +162,47 @@ pid  | locktype | mode        | granted | table_name | query
 5678 | relation | RowExclusive| t       | orders     | UPDATE orders SET ...
 ```
 
+table_details.txt
+```
+Detailed Table Information
+===========================
+
+Table: public.branches
+------------------------
+                                             Table "public.branches"
+      Column       | Type | Collation | Nullable | Default | Storage  | Compression | Stats target | Description 
+-------------------+------+-----------+----------+---------+----------+-------------+--------------+-------------
+ branch_name       | text |           |          |         | extended |             |              | 
+ connection_string | text |           |          |         | extended |             |              | 
+Publications:
+    "peerdb_publication"
+Access method: heap
+
+
+Table: public.pgbench_accounts
+------------------------
+                                   Partitioned table "public.pgbench_accounts"
+  Column  |     Type      | Collation | Nullable | Default | Storage  | Compression | Stats target | Description 
+----------+---------------+-----------+----------+---------+----------+-------------+--------------+-------------
+ aid      | bigint        |           | not null |         | plain    |             |              | 
+ bid      | integer       |           |          |         | plain    |             |              | 
+ abalance | integer       |           |          |         | plain    |             |              | 
+ filler   | character(84) |           |          |         | extended |             |              | 
+Partition key: RANGE (aid)
+Publications:
+    "peerdb_publication"
+Partitions: pgbench_accounts_10 FOR VALUES FROM ('6312510001') TO (MAXVALUE),
+            pgbench_accounts_2 FOR VALUES FROM ('701390001') TO ('1402780001'),
+            pgbench_accounts_3 FOR VALUES FROM ('1402780001') TO ('2104170001'),
+            pgbench_accounts_4 FOR VALUES FROM ('2104170001') TO ('2805560001'),
+            pgbench_accounts_5 FOR VALUES FROM ('2805560001') TO ('3506950001'),
+            pgbench_accounts_6 FOR VALUES FROM ('3506950001') TO ('4208340001'),
+            pgbench_accounts_7 FOR VALUES FROM ('4208340001') TO ('4909730001'),
+            pgbench_accounts_8 FOR VALUES FROM ('4909730001') TO ('5611120001'),
+            pgbench_accounts_9 FOR VALUES FROM ('5611120001') TO ('6312510001')
+
+```
+
 This summary provides a quick overview of your PostgreSQL instance's state, including version, database sizes, table sizes, settings, activity, and potential issues like long-running queries or locks.
 
 # Troubleshooting
